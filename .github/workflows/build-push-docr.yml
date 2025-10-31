@@ -34,12 +34,9 @@ jobs:
           if [ "$BRANCH" = "main" ]; then PRIMARY=latest; else PRIMARY=dev; fi
           echo "tags=${REGISTRY}/${IMAGE_NAME}:${PRIMARY},${REGISTRY}/${IMAGE_NAME}:${PRIMARY}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
-      - name: Build & Push
+      - name: Build & Push Docker Image
         uses: docker/build-push-action@v6        # Build & push to DOCR :contentReference[oaicite:5]{index=5}
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-
-      - name: Show pushed tags
-        run: echo "Pushed: ${{ steps.meta.outputs.tags }}"
