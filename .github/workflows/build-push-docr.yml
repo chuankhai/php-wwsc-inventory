@@ -1,0 +1,45 @@
+name: Build & Push to DOCR (main + dev)
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ secrets.REGISTRY }}      # e.g. registry.digitalocean.com/my-registry
+  IMAGE_NAME: ${{ secrets.IMAGE_NAME }}  # e.g. qr-inventory
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3   # Buildx builder (BuildKit) :contentReference[oaicite:3]{index=3}
+
+      # Install doctl and login to DOCR
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_ACCESS_TOKEN }}   # PAT with registry write
+      - name: Login to DOCR
+        run: doctl registry login                 # configures Docker auth to DOCR :contentReference[oaicite:4]{index=4}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          BRANCH="${GITHUB_REF##*/}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          if [ "$BRANCH" = "main" ]; then PRIMARY=latest; else PRIMARY=dev; fi
+          echo "tags=${REGISTRY}/${IMAGE_NAME}:${PRIMARY},${REGISTRY}/${IMAGE_NAME}:${PRIMARY}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6        # Build & push to DOCR :contentReference[oaicite:5]{index=5}
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Show pushed tags
+        run: echo "Pushed: ${{ steps.meta.outputs.tags }}"
