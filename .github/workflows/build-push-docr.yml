@@ -60,6 +60,7 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: ${{ secrets.DROPLET_USER }}      # e.g. root
           key: ${{ secrets.DROPLET_SSH_KEY }}        # private key
+          passphrase: ${{ secrets.DROPLET_SSH_PASSPHRASE }} 
           script: |
             cd /srv/wwsc-inventory
             doctl registry login                      # optional if your Droplet already logged in once
