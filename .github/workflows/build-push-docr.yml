@@ -4,10 +4,23 @@ on:
   push:
     branches: [ "main", "dev" ]
   workflow_dispatch:
+    inputs:
+        keep:
+          description: "How many recent tags to keep per group"
+          required: true
+          default: "10"
+        dry_run:
+          description: "Preview only (true/false)"
+          required: true
+          default: "true"
 
 env:
   REGISTRY: ${{ secrets.REGISTRY }}      # e.g. registry.digitalocean.com/my-registry
   IMAGE_NAME: ${{ secrets.IMAGE_NAME }}  # e.g. qr-inventory
+  DO_ACCESS_TOKEN: ${{ secrets.DO_ACCESS_TOKEN }}
+  KEEP: ${{ github.event.inputs.keep || 1 }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+  GROUPS: latest|main-.*|dev-.*
 
 jobs:
   build-and-push:
@@ -52,3 +65,97 @@ jobs:
             doctl registry login                      # optional if your Droplet already logged in once
             docker compose pull app
             docker compose up -d --no-deps app
+
+  cleanup:
+    needs: build-and-push
+    if: ${{ github.ref == 'refs/heads/main' }} # optional guard
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_ACCESS_TOKEN }}   # DO PAT with 'registry:write'
+
+      - name: List & prune tags in DOCR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPO="${IMAGE_NAME}"
+          echo "Repository: $REPO"
+          echo "Keep per group: ${KEEP}"
+          echo "Dry run: ${DRY_RUN}"
+          echo "Groups regex: ${GROUPS}"
+
+          # Pull all tags in JSON (includes digests & timestamps)
+          TAGS_JSON=$(doctl registry repository list-tags "$REPO" --output json)
+
+          # Protect these exact tags regardless of age (space-separated)
+          PROTECT_EXACT=("latest")
+
+          # Build a jq program:
+          # 1) Keep only tags matching GROUPS
+          # 2) Group them by which regex bucket they match (first match wins)
+          # 3) Sort each group by updated_at desc
+          # 4) Mark everything after the first KEEP as deletable
+          JQ_PROG=$(cat <<'JQ'
+            def bucket($groups):
+              .tag as $t
+              | if ($t|test($groups)) then
+                  if ($t|test("^latest$")) then "latest"
+                  elif ($t|test("^main-")) then "main"
+                  elif ($t|test("^dev-")) then "dev"
+                  elif ($t|test("^release-")) then "release"
+                  else "other"
+                  end
+                else empty end;
+
+            map({tag:.tag, digest:.manifest_digest, updated:.updated_at})
+            | group_by(bucket(env.GROUPS))
+            | map(
+                sort_by(.updated) | reverse
+                | (.[env.KEEP|tonumber:] // [])
+              )
+            | add
+          JQ
+          )
+
+          # Compute candidates to delete
+          DELETE_JSON=$(echo "$TAGS_JSON" | jq --arg GROUPS "$GROUPS" --arg KEEP "$KEEP" "$JQ_PROG")
+
+          # Also include any tags NOT matching GROUPS (optional): uncomment to purge all “other” tags
+          # OTHERS=$(echo "$TAGS_JSON" | jq --arg GROUPS "$GROUPS" '
+          #   map(select(.tag|test($GROUPS)|not) | {tag:.tag, digest:.manifest_digest})
+          # ')
+          # DELETE_JSON=$(jq -s 'add' <(echo "$DELETE_JSON") <(echo "$OTHERS"))
+
+          # Remove any explicitly protected tags if they somehow slipped in
+          for P in "${PROTECT_EXACT[@]}"; do
+            DELETE_JSON=$(echo "$DELETE_JSON" | jq --arg P "$P" 'map(select(.tag != $P))')
+          done
+
+          echo "Candidates to delete:"
+          echo "$DELETE_JSON" | jq -r '.[] | "\(.tag)  \(.digest)"' || echo "(none)"
+
+          COUNT=$(echo "$DELETE_JSON" | jq 'length')
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run enabled — not deleting."
+            exit 0
+          fi
+
+          # Delete by manifest digest (removes all tags pointing at that manifest)
+          echo "$DELETE_JSON" | jq -r '.[].digest' | while read -r DIGEST; do
+            if [[ -n "$DIGEST" ]]; then
+              echo "Deleting manifest: $DIGEST"
+              doctl registry repository delete-manifest "$REPO" "$DIGEST" --force
+            fi
+          done
+
+          echo "Cleanup complete."
+
+    
